@@ -1,0 +1,46 @@
+{
+  "name": "limahost-agent",
+  "version": "1.0.0",
+  "description": "LimaHost Agent for VM orchestration and management",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js",
+    "dev": "nodemon agent.js",
+    "install-service": "node scripts/install-service.js",
+    "uninstall-service": "node scripts/uninstall-service.js",
+    "test": "jest",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "lima",
+    "vm",
+    "orchestration",
+    "agent",
+    "container",
+    "docker"
+  ],
+  "author": "LimaHost Team",
+  "license": "MIT",
+  "dependencies": {
+    "dockerode": "^3.3.5",
+    "js-yaml": "^4.1.0",
+    "ws": "^8.14.2",
+    "pidusage": "^3.0.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.1",
+    "eslint": "^8.50.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/limahost/agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/limahost/agent/issues"
+  },
+  "homepage": "https://limahost.com"
+}

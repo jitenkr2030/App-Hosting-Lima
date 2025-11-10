@@ -1,0 +1,20 @@
+{
+  "agentId": "agent-localhost",
+  "agentName": "Local Development Agent",
+  "controlPlaneUrl": "http://localhost:3000",
+  "controlPlaneApiKey": "your-api-key-here",
+  "heartbeatInterval": 30000,
+  "metricsInterval": 10000,
+  "vmDataDir": "~/.lima",
+  "maxConcurrentOperations": 3,
+  "allowedCommands": [
+    "limactl",
+    "docker",
+    "nerdctl",
+    "ssh",
+    "rsync",
+    "tar"
+  ],
+  "logLevel": "info",
+  "logFile": "/tmp/lima-agent.log"
+}

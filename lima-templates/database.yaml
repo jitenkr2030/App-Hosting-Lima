@@ -1,0 +1,803 @@
+# Database Server Template
+# Optimized for PostgreSQL, MySQL, MongoDB, and other databases
+# Focuses on performance, security, and backup capabilities
+
+name: database-template
+arch: "x86_64"
+images:
+  - location: "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+    arch: "x86_64"
+    digest: "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+# Resource allocation - optimized for database workloads
+cpus: 4
+memory: "8GiB"
+disk: "50GiB"
+
+# Additional disk for database data
+additionalDisks:
+  - name: "db-data"
+    format: true
+    fsType: "ext4"
+
+# Mount host directories for data, logs, and backups
+mounts:
+  - location: "~/.lima/database/{{.Name}}/data"
+    writable: true
+    mountPoint: /data
+  - location: "~/.lima/database/{{.Name}}/logs"
+    writable: true
+    mountPoint: /var/log/database
+  - location: "~/.lima/database/{{.Name}}/backups"
+    writable: true
+    mountPoint: /backups
+
+# SSH configuration
+ssh:
+  localPort: 0
+  loadDotSSHPubKeys: true
+  forwardAgent: false
+  forwardX11: false
+
+# Container runtime configuration
+containerd:
+  system: true
+  user: true
+
+# Port forwarding for database services
+portForwards:
+  - guestPort: 5432
+    hostPort: 5432
+    proto: "tcp"   # PostgreSQL
+  - guestPort: 3306
+    hostPort: 3306
+    proto: "tcp"   # MySQL
+  - guestPort: 27017
+    hostPort: 27017
+    proto: "tcp"   # MongoDB
+  - guestPort: 6379
+    hostPort: 6379
+    proto: "tcp"   # Redis
+  - guestPort: 9090
+    hostPort: 9091
+    proto: "tcp"   # Exporter metrics
+
+# Network configuration
+networks:
+  - lima: shared
+
+# Provisioning scripts
+provision:
+  # System-level provisioning
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get upgrade -y
+      
+      # Install essential packages
+      apt-get install -y \
+        curl \
+        wget \
+        git \
+        logrotate \
+        fail2ban \
+        ufw \
+        htop \
+        iotop \
+        vmstat \
+        dstat \
+        sysstat \
+        ncdu \
+        rsync \
+        borgbackup \
+        prometheus-node-exporter \
+        postgresql-client \
+        mysql-client \
+        mongodb-clients \
+        redis-tools
+      
+      # Configure firewall
+      ufw --force enable
+      ufw allow ssh
+      ufw allow 5432    # PostgreSQL
+      ufw allow 3306    # MySQL
+      ufw allow 27017   # MongoDB
+      ufw allow 6379    # Redis
+      ufw allow 9091    # Metrics
+      
+      # Create database user
+      useradd -m -s /bin/bash dbuser || true
+      usermod -aG docker dbuser
+      
+      # Create necessary directories
+      mkdir -p /data/{postgres,mysql,mongodb,redis,backups} /var/log/database /backups
+      chown -R dbuser:dbuser /data /var/log/database /backups
+      
+      # Format and mount additional data disk
+      mkfs.ext4 /dev/disk/db-data
+      mount /dev/disk/db-data /data
+      echo '/dev/disk/db-data /data ext4 defaults 0 0' >> /etc/fstab
+      
+      # Configure log rotation
+      cat > /etc/logrotate.d/database << EOF
+      /var/log/database/*.log {
+          daily
+          missingok
+          rotate 30
+          compress
+          delaycompress
+          notifempty
+          create 644 dbuser dbuser
+          sharedscripts
+          postrotate
+              find /var/log/database -name "*.log.*" -mtime +30 -delete
+          endscript
+      }
+      EOF
+      
+      # Optimize system for database workloads
+      cat >> /etc/sysctl.conf << EOF
+      # Database optimization
+      vm.swappiness = 1
+      vm.dirty_ratio = 15
+      vm.dirty_background_ratio = 5
+      vm.vfs_cache_pressure = 50
+      net.core.rmem_max = 16777216
+      net.core.wmem_max = 16777216
+      net.ipv4.tcp_rmem = 4096 65536 16777216
+      net.ipv4.tcp_wmem = 4096 65536 16777216
+      net.core.netdev_max_backlog = 30000
+      net.ipv4.tcp_congestion_control = bbr
+      fs.file-max = 1000000
+      EOF
+      
+      # Set IO scheduler for better database performance
+      echo 'deadline' > /sys/block/sda/queue/scheduler
+      echo 'noop' > /sys/disk/db-data/queue/scheduler
+      
+      sysctl -p
+      
+      # Set ulimits for database
+      cat >> /etc/security/limits.conf << EOF
+      dbuser soft nofile 65536
+      dbuser hard nofile 65536
+      dbuser soft nproc 32768
+      dbuser hard nproc 32768
+      EOF
+      
+      # Create backup script
+      cat > /usr/local/bin/db-backup << 'EOF'
+      #!/bin/bash
+      set -eu
+      
+      BACKUP_DIR="/backups"
+      DATE=$(date +%Y%m%d_%H%M%S)
+      RETENTION_DAYS=30
+      
+      mkdir -p "$BACKUP_DIR"
+      
+      # Backup PostgreSQL
+      if docker ps --format 'table {{.Names}}' | grep -q postgres; then
+          echo "Backing up PostgreSQL..."
+          docker exec postgres pg_dumpall -U postgres > "$BACKUP_DIR/postgres_$DATE.sql"
+          gzip "$BACKUP_DIR/postgres_$DATE.sql"
+      fi
+      
+      # Backup MySQL
+      if docker ps --format 'table {{.Names}}' | grep -q mysql; then
+          echo "Backing up MySQL..."
+          docker exec mysql mysqldump --all-databases -u root -p$MYSQL_ROOT_PASSWORD > "$BACKUP_DIR/mysql_$DATE.sql"
+          gzip "$BACKUP_DIR/mysql_$DATE.sql"
+      fi
+      
+      # Backup MongoDB
+      if docker ps --format 'table {{.Names}}' | grep -q mongodb; then
+          echo "Backing up MongoDB..."
+          docker exec mongodb mongodump --out /tmp/mongobackup
+          docker cp mongodb:/tmp/mongobackup "$BACKUP_DIR/mongodb_$DATE"
+          docker exec mongodb rm -rf /tmp/mongobackup
+          tar -czf "$BACKUP_DIR/mongodb_$DATE.tar.gz" -C "$BACKUP_DIR" "mongodb_$DATE"
+          rm -rf "$BACKUP_DIR/mongodb_$DATE"
+      fi
+      
+      # Backup Redis
+      if docker ps --format 'table {{.Names}}' | grep -q redis; then
+          echo "Backing up Redis..."
+          docker exec redis redis-cli BGSAVE
+          sleep 5
+          docker cp redis:/data/dump.rdb "$BACKUP_DIR/redis_$DATE.rdb"
+      fi
+      
+      # Clean old backups
+      find "$BACKUP_DIR" -name "*.sql.gz" -mtime +$RETENTION_DAYS -delete
+      find "$BACKUP_DIR" -name "*.tar.gz" -mtime +$RETENTION_DAYS -delete
+      find "$BACKUP_DIR" -name "*.rdb" -mtime +$RETENTION_DAYS -delete
+      
+      echo "Backup completed: $DATE"
+      EOF
+      
+      chmod +x /usr/local/bin/db-backup
+      
+      # Schedule daily backups
+      cat > /etc/cron.d/db-backup << EOF
+      # Daily database backup at 2 AM
+      0 2 * * * dbuser /usr/local/bin/db-backup >> /var/log/database/backup.log 2>&1
+      EOF
+      
+      # Create monitoring service
+      cat > /etc/systemd/system/db-monitor.service << 'EOF'
+      [Unit]
+      Description=Database Health Monitor
+      After=network.target docker.service
+      
+      [Service]
+      Type=simple
+      User=dbuser
+      WorkingDirectory=/data
+      ExecStart=/usr/local/bin/db-monitor
+      Restart=always
+      RestartSec=30
+      
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+  # Install container runtime
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      
+      apt-get install -y containerd
+      
+      mkdir -p /etc/containerd
+      containerd config default > /etc/containerd/config.toml
+      
+      # Optimize containerd for database workloads
+      sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+      
+      systemctl restart containerd
+      systemctl enable containerd
+      
+      # Install nerdctl
+      curl -sSL https://github.com/containerd/nerdctl/releases/download/v1.7.0/nerdctl-1.7.0-linux-amd64.tar.gz | tar -xz -C /usr/local/bin
+
+  # User-level provisioning
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      
+      mkdir -p ~/database ~/monitoring ~/backups
+      
+      # Create PostgreSQL configuration
+      mkdir -p ~/database/postgres/config
+      cat > ~/database/postgres/config/postgresql.conf << 'EOF'
+      # PostgreSQL configuration optimized for performance
+      listen_addresses = '*'
+      max_connections = 200
+      shared_buffers = 2GB
+      effective_cache_size = 6GB
+      maintenance_work_mem = 512MB
+      checkpoint_completion_target = 0.9
+      wal_buffers = 16MB
+      default_statistics_target = 100
+      random_page_cost = 1.1
+      effective_io_concurrency = 200
+      work_mem = 8MB
+      min_wal_size = 1GB
+      max_wal_size = 4GB
+      max_worker_processes = 8
+      max_parallel_workers_per_gather = 4
+      max_parallel_workers = 8
+      max_parallel_maintenance_workers = 4
+      
+      # Logging
+      log_destination = 'stderr'
+      logging_collector = on
+      log_directory = '/var/log/database'
+      log_filename = 'postgresql.log'
+      log_statement = 'mod'
+      log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+      
+      # SSL
+      ssl = on
+      ssl_cert_file = '/etc/ssl/certs/postgres-cert.pem'
+      ssl_key_file = '/etc/ssl/private/postgres-key.pem'
+      EOF
+      
+      # Create PostgreSQL docker-compose
+      cat > ~/database/postgres/docker-compose.yml << 'EOF'
+      version: '3.8'
+      
+      services:
+        postgres:
+          image: postgres:15
+          container_name: postgres
+          restart: unless-stopped
+          ports:
+            - "5432:5432"
+          environment:
+            POSTGRES_DB: ${POSTGRES_DB}
+            POSTGRES_USER: ${POSTGRES_USER}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+          volumes:
+            - ../../data/postgres:/var/lib/postgresql/data
+            - ./config:/etc/postgresql/conf.d
+            - ../../logs:/var/log/database
+          networks:
+            - db-network
+          healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+          deploy:
+            resources:
+              limits:
+                cpus: '2.0'
+                memory: 4G
+              reservations:
+                cpus: '0.5'
+                memory: 1G
+        
+        postgres-exporter:
+          image: prometheuscommunity/postgres-exporter
+          container_name: postgres-exporter
+          restart: unless-stopped
+          ports:
+            - "9187:9187"
+          environment:
+            DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+          networks:
+            - db-network
+          depends_on:
+            - postgres
+      
+      networks:
+        db-network:
+          driver: bridge
+      EOF
+      
+      # Create MySQL configuration
+      mkdir -p ~/database/mysql/config
+      cat > ~/database/mysql/config/my.cnf << 'EOF'
+      [mysqld]
+      # General
+      user = mysql
+      port = 3306
+      socket = /var/run/mysqld/mysqld.sock
+      pid-file = /var/run/mysqld/mysqld.pid
+      
+      # Performance
+      innodb_buffer_pool_size = 4G
+      innodb_log_file_size = 1G
+      innodb_log_buffer_size = 64M
+      innodb_flush_log_at_trx_commit = 2
+      innodb_flush_method = O_DIRECT
+      innodb_file_per_table = 1
+      innodb_read_io_threads = 8
+      innodb_write_io_threads = 8
+      innodb_thread_concurrency = 16
+      query_cache_type = 0
+      query_cache_size = 0
+      max_connections = 200
+      thread_cache_size = 16
+      table_open_cache = 2000
+      tmp_table_size = 64M
+      max_heap_table_size = 64M
+      
+      # Logging
+      slow_query_log = 1
+      slow_query_log_file = /var/log/database/mysql-slow.log
+      long_query_time = 2
+      log_queries_not_using_indexes = 1
+      log_error = /var/log/database/mysql-error.log
+      
+      # Security
+      bind-address = 0.0.0.0
+      skip-name-resolve
+      local_infile = 0
+      
+      # Replication (if needed)
+      server-id = 1
+      log_bin = /var/log/database/mysql-bin.log
+      binlog_format = ROW
+      expire_logs_days = 7
+      EOF
+      
+      # Create MySQL docker-compose
+      cat > ~/database/mysql/docker-compose.yml << 'EOF'
+      version: '3.8'
+      
+      services:
+        mysql:
+          image: mysql:8.0
+          container_name: mysql
+          restart: unless-stopped
+          ports:
+            - "3306:3306"
+          environment:
+            MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+            MYSQL_DATABASE: ${MYSQL_DATABASE}
+            MYSQL_USER: ${MYSQL_USER}
+            MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+          volumes:
+            - ../../data/mysql:/var/lib/mysql
+            - ./config:/etc/mysql/conf.d
+            - ../../logs:/var/log/database
+          networks:
+            - db-network
+          healthcheck:
+            test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+          command: --default-authentication-plugin=mysql_native_password
+          deploy:
+            resources:
+              limits:
+                cpus: '2.0'
+                memory: 4G
+              reservations:
+                cpus: '0.5'
+                memory: 1G
+        
+        mysql-exporter:
+          image: prom/mysqld-exporter
+          container_name: mysql-exporter
+          restart: unless-stopped
+          ports:
+            - "9104:9104"
+          environment:
+            DATA_SOURCE_NAME: "root:${MYSQL_ROOT_PASSWORD}@(mysql:3306)/"
+          networks:
+            - db-network
+          depends_on:
+            - mysql
+      
+      networks:
+        db-network:
+          driver: bridge
+      EOF
+      
+      # Create MongoDB configuration
+      mkdir -p ~/database/mongodb/config
+      cat > ~/database/mongodb/config/mongod.conf << 'EOF'
+      storage:
+        dbPath: /data/db
+        journal:
+          enabled: true
+        engine: wiredTiger
+        wiredTiger:
+          engineConfig:
+            cacheSizeGB: 2
+      
+      net:
+        port: 27017
+        bindIp: 0.0.0.0
+      
+      replication:
+        replSetName: rs0
+      
+      security:
+        authorization: enabled
+      
+      operationProfiling:
+        slowOpThresholdMs: 100
+        mode: slowOp
+      
+      systemLog:
+        destination: file
+        path: /var/log/database/mongod.log
+        logAppend: true
+      EOF
+      
+      # Create MongoDB docker-compose
+      cat > ~/database/mongodb/docker-compose.yml << 'EOF'
+      version: '3.8'
+      
+      services:
+        mongodb:
+          image: mongo:6.0
+          container_name: mongodb
+          restart: unless-stopped
+          ports:
+            - "27017:27017"
+          environment:
+            MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+            MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+          volumes:
+            - ../../data/mongodb:/data/db
+            - ./config:/etc/mongo
+            - ../../logs:/var/log/database
+          networks:
+            - db-network
+          healthcheck:
+            test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+          deploy:
+            resources:
+              limits:
+                cpus: '2.0'
+                memory: 4G
+              reservations:
+                cpus: '0.5'
+                memory: 1G
+        
+        mongodb-exporter:
+          image: percona/mongodb_exporter:0.40
+          container_name: mongodb-exporter
+          restart: unless-stopped
+          ports:
+            - "9216:9216"
+          environment:
+            MONGODB_URI: "mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongodb:27017"
+          networks:
+            - db-network
+          depends_on:
+            - mongodb
+      
+      networks:
+        db-network:
+          driver: bridge
+      EOF
+      
+      # Create Redis configuration
+      mkdir -p ~/database/redis/config
+      cat > ~/database/redis/config/redis.conf << 'EOF'
+      bind 0.0.0.0
+      port 6379
+      tcp-backlog 511
+      timeout 0
+      tcp-keepalive 300
+      daemonize no
+      supervised no
+      pidfile /var/run/redis/redis-server.pid
+      loglevel notice
+      logfile /var/log/database/redis.log
+      databases 16
+      always-show-logo yes
+      save 900 1
+      save 300 10
+      save 60 10000
+      stop-writes-on-bgsave-error yes
+      rdbcompression yes
+      rdbchecksum yes
+      dbfilename dump.rdb
+      dir /data
+      replica-serve-stale-data yes
+      replica-read-only yes
+      repl-diskless-sync no
+      repl-diskless-sync-delay 5
+      repl-disable-tcp-nodelay no
+      replica-priority 100
+      maxmemory-policy allkeys-lru
+      lazyfree-lazy-eviction yes
+      lazyfree-lazy-expire yes
+      lazyfree-lazy-server-del yes
+      lazyfree-lazy-user-del yes
+      appendonly yes
+      appendfilename "appendonly.aof"
+      appendfsync everysec
+      no-appendfsync-on-rewrite no
+      auto-aof-rewrite-percentage 100
+      auto-aof-rewrite-min-size 64mb
+      aof-load-truncated yes
+      aof-use-rdb-preamble yes
+      lua-time-limit 5000
+      slowlog-log-slower-than 10000
+      slowlog-max-len 128
+      latency-monitor-threshold 0
+      notify-keyspace-events ""
+      hash-max-ziplist-entries 512
+      hash-max-ziplist-value 64
+      list-max-ziplist-size -2
+      list-compress-depth 0
+      set-max-intset-entries 512
+      zset-max-ziplist-entries 128
+      zset-max-ziplist-value 64
+      hll-sparse-max-bytes 3000
+      stream-node-max-bytes 4096
+      stream-node-max-entries 100
+      activerehashing yes
+      client-output-buffer-limit normal 0 0 0
+      client-output-buffer-limit replica 256mb 64mb 60
+      client-output-buffer-limit pubsub 32mb 8mb 60
+      hz 10
+      dynamic-hz yes
+      aof-rewrite-incremental-fsync yes
+      rdb-save-incremental-fsync yes
+      EOF
+      
+      # Create Redis docker-compose
+      cat > ~/database/redis/docker-compose.yml << 'EOF'
+      version: '3.8'
+      
+      services:
+        redis:
+          image: redis:7-alpine
+          container_name: redis
+          restart: unless-stopped
+          ports:
+            - "6379:6379"
+          volumes:
+            - ../../data/redis:/data
+            - ./config:/etc/redis
+            - ../../logs:/var/log/database
+          networks:
+            - db-network
+          healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+          command: redis-server /etc/redis/redis.conf
+          deploy:
+            resources:
+              limits:
+                cpus: '1.0'
+                memory: 2G
+              reservations:
+                cpus: '0.1'
+                memory: 128M
+        
+        redis-exporter:
+          image: oliver006/redis_exporter
+          container_name: redis-exporter
+          restart: unless-stopped
+          ports:
+            - "9121:9121"
+          environment:
+            REDIS_ADDR: "redis:6379"
+          networks:
+            - db-network
+          depends_on:
+            - redis
+      
+      networks:
+        db-network:
+          driver: bridge
+      EOF
+      
+      # Create database deployment script
+      cat > ~/database/deploy.sh << 'EOF'
+      #!/bin/bash
+      set -eu
+      
+      DB_TYPE="${1:-postgres}"
+      
+      case $DB_TYPE in
+        postgres)
+          cd postgres
+          export POSTGRES_DB="${2:-mydb}"
+          export POSTGRES_USER="${3:-myuser}"
+          export POSTGRES_PASSWORD="${4:-$(openssl rand -base64 32)}"
+          
+          echo "Deploying PostgreSQL..."
+          echo "Database: $POSTGRES_DB"
+          echo "User: $POSTGRES_USER"
+          echo "Password: $POSTGRES_PASSWORD"
+          
+          docker-compose down
+          docker-compose pull
+          docker-compose up -d
+          ;;
+        mysql)
+          cd mysql
+          export MYSQL_ROOT_PASSWORD="${2:-$(openssl rand -base64 32)}"
+          export MYSQL_DATABASE="${3:-mydb}"
+          export MYSQL_USER="${4:-myuser}"
+          export MYSQL_PASSWORD="${5:-$(openssl rand -base64 32)}"
+          
+          echo "Deploying MySQL..."
+          echo "Root Password: $MYSQL_ROOT_PASSWORD"
+          echo "Database: $MYSQL_DATABASE"
+          echo "User: $MYSQL_USER"
+          echo "Password: $MYSQL_PASSWORD"
+          
+          docker-compose down
+          docker-compose pull
+          docker-compose up -d
+          ;;
+        mongodb)
+          cd mongodb
+          export MONGO_ROOT_USERNAME="${2:-myuser}"
+          export MONGO_ROOT_PASSWORD="${3:-$(openssl rand -base64 32)}"
+          
+          echo "Deploying MongoDB..."
+          echo "Root User: $MONGO_ROOT_USERNAME"
+          echo "Root Password: $MONGO_ROOT_PASSWORD"
+          
+          docker-compose down
+          docker-compose pull
+          docker-compose up -d
+          ;;
+        redis)
+          cd redis
+          
+          echo "Deploying Redis..."
+          
+          docker-compose down
+          docker-compose pull
+          docker-compose up -d
+          ;;
+        *)
+          echo "Usage: $0 {postgres|mysql|mongodb|redis} [options]"
+          echo "  postgres: [db_name] [user] [password]"
+          echo "  mysql: [root_password] [db_name] [user] [password]"
+          echo "  mongodb: [root_user] [root_password]"
+          echo "  redis: (no additional options)"
+          exit 1
+          ;;
+      esac
+      
+      echo "Database deployed successfully!"
+      EOF
+      
+      chmod +x ~/database/deploy.sh
+
+# Health checks
+probes:
+  - mode: readiness
+    description: Check containerd
+    script: |
+      #!/bin/bash
+      systemctl is-active --quiet containerd
+  - mode: readiness
+    description: Check data disk
+    script: |
+      #!/bin/bash
+      mountpoint -q /data
+  - mode: readiness
+    description: Check Docker
+    script: |
+      #!/bin/bash
+      docker info >/dev/null 2>&1
+
+# Message for users
+message: |
+  Database server template has been successfully created!
+  
+  Features included:
+  - Ubuntu 22.04 LTS
+  - Optimized for database workloads
+  - Separate data disk for better performance
+  - PostgreSQL, MySQL, MongoDB, and Redis support
+  - Automated backups with retention
+  - Monitoring with Prometheus exporters
+  - Security configurations
+  - Performance optimizations
+  
+  Quick start:
+  1. Deploy PostgreSQL:
+      cd ~/database
+      ./deploy.sh postgres [db_name] [user] [password]
+  
+  2. Deploy MySQL:
+      ./deploy.sh mysql [root_pass] [db_name] [user] [password]
+  
+  3. Deploy MongoDB:
+      ./deploy.sh mongodb [root_user] [root_password]
+  
+  4. Deploy Redis:
+      ./deploy.sh redis
+  
+  5. Manual backup:
+      /usr/local/bin/db-backup
+  
+  6. Check container status:
+      docker-compose ps
+  
+  Connection information:
+  - PostgreSQL: localhost:5432
+  - MySQL: localhost:3306
+  - MongoDB: localhost:27017
+  - Redis: localhost:6379
+  - Metrics: localhost:9091

@@ -1,0 +1,351 @@
+# Web Application Template
+# Optimized for modern web applications (Node.js, Python, Ruby, etc.)
+# Includes container runtime, reverse proxy, and SSL support
+
+name: webapp-template
+arch: "x86_64"
+images:
+  - location: "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+    arch: "x86_64"
+    digest: "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+# Resource allocation - can be overridden during app creation
+cpus: 2
+memory: "4GiB"
+disk: "20GiB"
+
+# Mount host directories for development and data persistence
+mounts:
+  - location: "~/.lima/webapp/{{.Name}}/data"
+    writable: true
+    mountPoint: "/data"
+  - location: "~/.lima/webapp/{{.Name}}/logs"
+    writable: true
+    mountPoint: "/var/log/app"
+
+# SSH configuration for secure access
+ssh:
+  localPort: 0
+  loadDotSSHPubKeys: true
+  forwardAgent: false
+  forwardX11: false
+
+# Container runtime configuration
+containerd:
+  system: true   # Enable system-wide containerd
+  user: true     # Enable user-scoped containerd
+
+# Port forwarding for web applications
+portForwards:
+  - guestPort: 80
+    hostPort: 8080
+    proto: "tcp"
+  - guestPort: 443
+    hostPort: 8443
+    proto: "tcp"
+  - guestPort: 3000
+    hostPort: 3000
+    proto: "tcp"   # For development servers
+
+# Network configuration
+networks:
+  - lima: shared
+
+# Provisioning scripts for setup and optimization
+provision:
+  # System-level provisioning
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      
+      # Update system packages
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get upgrade -y
+      
+      # Install essential packages
+      apt-get install -y \
+        curl \
+        wget \
+        git \
+        nginx \
+        certbot \
+        python3-certbot-nginx \
+        logrotate \
+        fail2ban \
+        ufw
+      
+      # Configure firewall
+      ufw --force enable
+      ufw allow ssh
+      ufw allow 'Nginx Full'
+      
+      # Create app user
+      useradd -m -s /bin/bash appuser || true
+      usermod -aG docker appuser
+      
+      # Create necessary directories
+      mkdir -p /app /data /var/log/app
+      chown -R appuser:appuser /app /data /var/log/app
+      
+      # Configure log rotation
+      cat > /etc/logrotate.d/app << EOF
+      /var/log/app/*.log {
+          daily
+          missingok
+          rotate 7
+          compress
+          delaycompress
+          notifempty
+          create 644 appuser appuser
+      }
+      EOF
+      
+      # Optimize system settings for web applications
+      cat >> /etc/sysctl.conf << EOF
+      # Web application optimization
+      net.core.somaxconn = 65535
+      net.ipv4.tcp_max_syn_backlog = 65535
+      net.ipv4.tcp_tw_reuse = 1
+      net.ipv4.ip_local_port_range = 10000 65535
+      EOF
+      
+      sysctl -p
+
+  # Install and configure container runtime
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      
+      # Install containerd
+      apt-get install -y containerd
+      
+      # Configure containerd
+      mkdir -p /etc/containerd
+      containerd config default > /etc/containerd/config.toml
+      
+      # Update containerd configuration for better performance
+      sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+      
+      # Restart and enable containerd
+      systemctl restart containerd
+      systemctl enable containerd
+      
+      # Install nerdctl for container management
+      curl -sSL https://github.com/containerd/nerdctl/releases/download/v1.7.0/nerdctl-1.7.0-linux-amd64.tar.gz | tar -xz -C /usr/local/bin
+      
+      # Install Docker Compose
+      curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      chmod +x /usr/local/bin/docker-compose
+
+  # Configure Nginx reverse proxy
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      
+      # Create Nginx configuration directory for apps
+      mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+      
+      # Create default Nginx configuration
+      cat > /etc/nginx/nginx.conf << 'EOF'
+      user www-data;
+      worker_processes auto;
+      pid /run/nginx.pid;
+      include /etc/nginx/modules-enabled/*.conf;
+      
+      events {
+          worker_connections 768;
+      }
+      
+      http {
+          sendfile on;
+          tcp_nopush on;
+          tcp_nodelay on;
+          keepalive_timeout 65;
+          types_hash_max_size 2048;
+          
+          include /etc/nginx/mime.types;
+          default_type application/octet-stream;
+          
+          ssl_protocols TLSv1.2 TLSv1.3;
+          ssl_prefer_server_ciphers on;
+          
+          access_log /var/log/nginx/access.log;
+          error_log /var/log/nginx/error.log;
+          
+          gzip on;
+          gzip_vary on;
+          gzip_proxied any;
+          gzip_comp_level 6;
+          gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+          
+          include /etc/nginx/conf.d/*.conf;
+          include /etc/nginx/sites-enabled/*;
+      }
+      EOF
+      
+      # Create app template configuration
+      cat > /etc/nginx/sites-available/app-template << 'EOF'
+      server {
+          listen 80;
+          server_name _;
+          return 301 https://$host$request_uri;
+      }
+      
+      server {
+          listen 443 ssl http2;
+          server_name _;
+          
+          ssl_certificate /etc/letsencrypt/live/app/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/app/privkey.pem;
+          
+          location / {
+              proxy_pass http://127.0.0.1:3000;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              
+              # WebSocket support
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+          }
+          
+          location /health {
+              access_log off;
+              return 200 "healthy\n";
+              add_header Content-Type text/plain;
+          }
+      }
+      EOF
+      
+      # Test Nginx configuration
+      nginx -t
+      
+      # Enable the site
+      ln -sf /etc/nginx/sites-available/app-template /etc/nginx/sites-enabled/
+      
+      # Restart Nginx
+      systemctl restart nginx
+      systemctl enable nginx
+
+  # User-level provisioning for app deployment
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      
+      # Create app directory structure
+      mkdir -p ~/app ~/logs ~/data
+      
+      # Create docker-compose.yml template
+      cat > ~/app/docker-compose.yml.template << 'EOF'
+      version: '3.8'
+      
+      services:
+        app:
+          image: ${DOCKER_IMAGE}
+          container_name: ${APP_NAME}
+          restart: unless-stopped
+          ports:
+            - "3000:3000"
+          environment:
+            - NODE_ENV=${NODE_ENV}
+            - PORT=3000
+            - DATABASE_URL=${DATABASE_URL}
+          volumes:
+            - ../data:/app/data
+            - ../logs:/app/logs
+          networks:
+            - app-network
+          healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+      
+      networks:
+        app-network:
+          driver: bridge
+      EOF
+      
+      # Create deployment script
+      cat > ~/app/deploy.sh << 'EOF'
+      #!/bin/bash
+      set -eu
+      
+      # Environment variables
+      export DOCKER_IMAGE="${1:-nginx:latest}"
+      export APP_NAME="${2:-webapp}"
+      export NODE_ENV="${3:-production}"
+      export DATABASE_URL="${4:-}"
+      
+      # Copy and configure docker-compose
+      cp docker-compose.yml.template docker-compose.yml
+      sed -i "s|\${DOCKER_IMAGE}|$DOCKER_IMAGE|g" docker-compose.yml
+      sed -i "s|\${APP_NAME}|$APP_NAME|g" docker-compose.yml
+      sed -i "s|\${NODE_ENV}|$NODE_ENV|g" docker-compose.yml
+      sed -i "s|\${DATABASE_URL}|$DATABASE_URL|g" docker-compose.yml
+      
+      # Deploy the application
+      docker-compose down
+      docker-compose pull
+      docker-compose up -d
+      
+      echo "Application deployed successfully!"
+      EOF
+      
+      chmod +x ~/app/deploy.sh
+
+# Health checks to ensure the VM is ready
+probes:
+  - mode: readiness
+    description: Check if containerd is running
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      systemctl is-active --quiet containerd
+  - mode: readiness
+    description: Check if Nginx is running
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      systemctl is-active --quiet nginx
+  - mode: readiness
+    description: Check if Docker is accessible
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      docker info >/dev/null 2>&1
+
+# Message for users after VM creation
+message: |
+  Web application template has been successfully created!
+  
+  The VM includes:
+  - Ubuntu 22.04 LTS
+  - Container runtime (containerd + nerdctl)
+  - Nginx reverse proxy with SSL support
+  - Firewall configuration
+  - Log rotation
+  
+  Quick start:
+  1. Deploy your application:
+      cd ~/app
+      ./deploy.sh <docker-image> <app-name> <environment> <database-url>
+  
+  2. Check application status:
+      docker-compose ps
+  
+  3. View logs:
+      docker-compose logs -f
+  
+  4. Access your application:
+      https://localhost:8443
+  
+  For SSL certificates, use Let's Encrypt:
+      sudo certbot --nginx -d your-domain.com

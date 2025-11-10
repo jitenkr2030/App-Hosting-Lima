@@ -1,0 +1,110 @@
+{
+  "agentId": "agent-001",
+  "agentName": "production-server-1",
+  "controlPlaneUrl": "https://api.limahost.com",
+  "controlPlaneApiKey": "your-api-key-here",
+  
+  "heartbeatInterval": 30000,
+  "metricsInterval": 10000,
+  
+  "vmDataDir": "~/.lima",
+  "maxConcurrentOperations": 3,
+  
+  "allowedCommands": [
+    "limactl",
+    "docker",
+    "nerdctl",
+    "ssh",
+    "rsync",
+    "tar",
+    "curl",
+    "wget"
+  ],
+  
+  "logLevel": "info",
+  "logFile": "/var/log/limahost-agent.log",
+  
+  "security": {
+    "allowedControlPlaneIps": [
+      "192.168.1.100",
+      "10.0.0.50"
+    ],
+    "maxCommandTimeout": 300000,
+    "requireCommandApproval": false,
+    "allowedVmTemplates": [
+      "webapp",
+      "api",
+      "database",
+      "dev"
+    ]
+  },
+  
+  "resourceLimits": {
+    "maxVmsPerAgent": 10,
+    "maxCpuPerVm": 8,
+    "maxMemoryPerVm": 16,
+    "maxDiskPerVm": 100,
+    "maxTotalCpu": 32,
+    "maxTotalMemory": 64,
+    "maxTotalDisk": 500
+  },
+  
+  "backup": {
+    "enabled": true,
+    "defaultBackupPath": "/backups/limahost",
+    "compressionEnabled": true,
+    "retentionDays": 30,
+    "schedule": "0 2 * * *" // Cron expression for daily backups at 2 AM
+  },
+  
+  "monitoring": {
+    "enabled": true,
+    "metricsRetentionDays": 7,
+    "healthCheckInterval": 30000,
+    "performanceThresholds": {
+      "cpuWarning": 80,
+      "cpuCritical": 90,
+      "memoryWarning": 85,
+      "memoryCritical": 95,
+      "diskWarning": 80,
+      "diskCritical": 90
+    }
+  },
+  
+  "networking": {
+    "portRange": {
+      "start": 8000,
+      "end": 9000
+    },
+    "defaultGateway": "192.168.64.1",
+    "dnsServers": [
+      "8.8.8.8",
+      "8.8.4.4"
+    ]
+  },
+  
+  "templates": {
+    "basePath": "/etc/limahost/templates",
+    "customTemplatesPath": "/etc/limahost/custom-templates"
+  },
+  
+  "notifications": {
+    "enabled": true,
+    "webhookUrl": "",
+    "email": {
+      "smtp": {
+        "host": "",
+        "port": 587,
+        "secure": false,
+        "auth": {
+          "user": "",
+          "pass": ""
+        }
+      },
+      "from": "limahost-agent@example.com",
+      "to": [
+        "admin@example.com"
+      ]
+    }
+  }
+}
